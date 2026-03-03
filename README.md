@@ -1,4 +1,4 @@
-# Whitepaper
+# Whitepaper: Vector Scoring Reverse Engineering
 
 ## English Version
 
