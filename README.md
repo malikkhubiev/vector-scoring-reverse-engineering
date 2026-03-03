@@ -381,14 +381,17 @@ This case demonstrates a general methodology for black-box auditing of similarit
 ---
 
 ## 10. Diagrams
+Вот исправленная версия с корректным синтаксисом Mermaid для GitHub:
+
+## 10. Diagrams
 
 ### 10.1 Expected Similarity Pipeline (Assumed Before Audit)
 
 ```mermaid
 flowchart LR
-  Q[Query embedding] -->|cosine similarity| DB[(candidate_embedding_info)]
-  DB -->|raw cosine (SQL)| Norm[Classical normalization f_classic(x)]
-  Norm -->|normalized score in [0,1]| ECM[ECM similarity]
+  Q["Query embedding"] -->|"cosine similarity"| DB[("candidate_embedding_info")]
+  DB -->|"raw cosine (SQL)"| Norm["Classical normalization f_classic(x)"]
+  Norm -->|"normalized score in [0,1]"| ECM["ECM similarity"]
 ```
 
 **Narrative:** It was initially assumed that the application exposes a classically normalized cosine similarity: the database returns a cosine value, a single global threshold T is applied, and scores are mapped from [T, 1] into [0, 1] via $$f_{classic}$$, producing ECM values that are globally comparable across queries and versions.
@@ -397,14 +400,90 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  Q[Query embedding] -->|cosine similarity| DB[(candidate_embedding_info)]
-  DB -->|raw cosine (SQL)| Thresh[Threshold selection<br/>T ∈ {0.76, 0.748}]
-  Thresh -->|per-candidate T| Affine[Affine transform f_obs(x)]
-  Affine -->|ECM score| ECM[ECM similarity]
+  Q["Query embedding"] -->|"cosine similarity"| DB[("candidate_embedding_info")]
+  DB -->|"raw cosine SQL"| Thresh{"similar > THRESHOLD?"}
+  
+  Thresh -->|"No"| Zero["return 0.0"]
+  
+  Thresh -->|"Yes"| Affine["ECM = (similar - (1-T)) / T"]
+  Affine --> ECM["ECM similarity"]
 ```
 
-**Narrative:** In reality, the production layer selects between at least two threshold regimes $$T_1 \approx 0.76$$ and $$T_2 \approx 0.748$$, and then applies the affine map $$f_{obs}(x) = \frac{x - (1 - T)}{T}$$. This preserves within-regime ranking but breaks cross-regime scale invariance, meaning ECM scores are not globally comparable as a calibrated similarity measure.
+**Narrative:** The reconstructed pipeline reveals two critical implementation details: first, a per-candidate threshold T is applied for filtering; second, the transformation uses an affine map that differs from classical normalization. The resulting ECM values are rank-preserving within queries but not scale-invariant across threshold regimes.
 
+### 10.3 Threshold Bifurcation Diagram
+
+```mermaid
+flowchart TD
+  subgraph GroupA["Group A (T = 0.76)"]
+    direction LR
+    A1["ECM-00001"] --> A2["(x - 0.24)/0.76"]
+    A1["ECM-00002"] --> A2
+    A1["ECM-00004"] --> A2
+    A1["ECM-00005"] --> A2
+    A1["ECM-00009"] --> A2
+    A1["ECM-00010"] --> A2
+    A1["ECM-00011"] --> A2
+  end
+
+  subgraph GroupB["Group B (T = 0.748)"]
+    direction LR
+    B1["ECM-00003"] --> B2["(x - 0.252)/0.748"]
+    B1["ECM-00006"] --> B2
+    B1["ECM-00007"] --> B2
+    B1["ECM-00008"] --> B2
+    B1["ECM-00012"] --> B2
+    B1["ECM-00013"] --> B2
+    B1["ECM-00014"] --> B2
+  end
+
+  SQL["Raw cosine (SQL)"] --> GroupA
+  SQL --> GroupB
+  GroupA --> ECM["ECM similarity"]
+  GroupB --> ECM
+```
+
+### 10.4 Mathematical Formulation
+
+The observed transformation can be expressed as:
+
+$$f_{obs}(x) = \frac{x - (1 - T)}{T}$$
+
+with the affine parameters:
+
+$$\alpha = \frac{1}{T}, \quad \beta = -\frac{1 - T}{T}$$
+
+### 10.5 Key Properties
+
+| Property | Value |
+|----------|-------|
+| Domain | $$x \in (T, 1]$$ |
+| Codomain | $$f_{obs}(x) \in (0, 1]$$ |
+| Zero point | $$f_{obs}(1 - T) = 0$$ |
+| Unit point | $$f_{obs}(1) = 1$$ |
+| Monotonicity | Strictly increasing ($$\frac{df}{dx} = \frac{1}{T} > 0$$) |
+| Ranking | Preserved within same T |
+| Scale invariance | Not preserved across different T |
+
+### 10.6 Pipeline Comparison Summary
+
+```mermaid
+flowchart TB
+  subgraph Expected["Expected Pipeline"]
+    E1["Raw cosine x"] --> E2{"x > T?"}
+    E2 -->|"No"| E3["return 0.0"]
+    E2 -->|"Yes"| E4["ECM = (x - T)/(1 - T)"]
+    E4 --> E5["Global comparability ✓"]
+  end
+
+  subgraph Actual["Actual Pipeline"]
+    A1["Raw cosine x"] --> A2{"x > T?"}
+    A2 -->|"No"| A3["return 0.0"]
+    A2 -->|"Yes"| A4["ECM = (x - (1 - T))/T"]
+    A4 --> A5["Local ranking ✓"]
+    A4 --> A6["Global scale ✗"]
+  end
+```
 ---
 
 ## Русская версия
@@ -670,363 +749,3 @@ $$
 
 - ожидаемый (классический) pipeline похожести;
  фактически реконструированный pipeline с двумя порогами и аффинным преобразованием $$f_{obs}(x) = \frac{x - (1 - T)}{T}$$.
-
-# Whitepaper
-
-## Forensic Audit of a Production Vector Similarity Scoring Layer
-
-### Affine Post-Processing, Threshold Bifurcation, and Ranking Invariance Analysis
-
----
-
-## 1. Executive Summary
-
-This document presents a formal internal-style audit of a production vector similarity scoring layer in which application-level similarity values (ECM) diverge from database-level cosine similarities (SQL).
-
-The investigation was conducted without source code access and relied exclusively on observable numerical outputs. Reconstruction demonstrates that:
-
-1. Raw cosine similarity is not directly exposed.
-2. The production layer applies a non-classical affine transformation.
-3. Two distinct threshold regimes are active simultaneously.
-4. The transformation preserves ranking (monotonicity holds).
-5. However, score invariance across threshold changes is not preserved.
-
-All candidate identifiers are anonymized (ECM-00001, ECM-00002, …). Numerical patterns correspond to anonymized empirical observations derived from internal documentation .
-
----
-
-## 2. Data Sources and Empirical Basis
-
-Two numerical signals were observed:
-
-* SQL similarity (derived from `candidate_embedding_info`, MAX aggregation)
-* ECM similarity (application-layer value)
-
-Empirical comparison confirms that ECM values are derived from `candidate_embedding_info` rather than from the raw `candidate` table .
-
-Example (anonymized):
-
-| Candidate | SQL (cei_max) | ECM      |
-| --------- | ------------- | -------- |
-| ECM-00001 | 0.838369      | 0.785937 |
-| ECM-00002 | 0.819256      | 0.769357 |
-| ECM-00003 | 0.817317      | 0.755977 |
-
-The deviation between SQL and ECM reaches up to 0.1, which is material for ranking systems operating near high similarity thresholds.
-
----
-
-## 3. Classical Normalization vs Observed Transformation
-
-### 3.1 Canonical Threshold Normalization
-
-The classical normalization above threshold ( T ) is:
-
-$$
-f_{classic}(x) = \frac{x - T}{1 - T}
-$$
-
-This maps:
-
-$$
-[T, 1] \rightarrow [0, 1]
-$$
-
-with:
-
-* ( f(T) = 0 )
-* ( f(1) = 1 )
-
-Empirical evaluation shows that this formula does not reproduce ECM values .
-
----
-
-### 3.2 Reconstructed Production Transformation
-
-Empirical reconstruction yields:
-
-$$
-f_{obs}(x) = \frac{x - (1 - T)}{T}
-$$
-
-This is an affine transformation:
-
-$$
-f_{obs}(x) = \frac{1}{T}x - \frac{1 - T}{T}
-$$
-
-It differs structurally from classical normalization in both shift and scale.
-
-For ECM-00003:
-
-$$
-x = 0.817317, \quad T = 0.748
-$$
-
-$$
-f_{obs}(x) =
-
- \frac{0.817317 - 0.252}{0.748} =
-
-0.755977
-$$
-
-which matches ECM to six decimal places .
-
----
-
-## 4. Threshold Bifurcation
-
-Solving the observed transformation for ( T ):
-
-$$
-ECM = \frac{x - (1 - T)}{T}
-$$
-
-$$
-ECM \cdot T = x - 1 + T
-$$
-
-$$
-T(ECM - 1) = x - 1
-$$
-
-$$
-T = \frac{x - 1}{ECM - 1}
-$$
-
-Applying this inversion to all observed (SQL, ECM) pairs yields two stable modes:
-
-$$
-T_1 \approx 0.76
-$$
-
-$$
-T_2 \approx 0.748
-$$
-
-Candidates cluster into two internally consistent groups:
-
-* Group A: ( T = 0.76 )
-* Group B: ( T = 0.748 )
-
-Within each group, reconstruction accuracy reaches 100% for multiple cases .
-
-This establishes the existence of dual threshold regimes in production.
-
----
-
-## 5. Formal Analysis of Monotonicity
-
-Let:
-
-$$
-f_{obs}(x) = \frac{1}{T}x - \frac{1 - T}{T}
-$$
-
-Derivative:
-
-$$
-f'_{obs}(x) = \frac{1}{T}
-$$
-
-Since:
-
-$$
-T \in (0,1)
-$$
-
-$$
-\frac{1}{T} > 0
-$$
-
-Therefore:
-
-$$
-f'_{obs}(x) > 0
-$$
-
-The transformation is strictly monotonically increasing.
-
-### Consequence
-
-For any two similarities ( x_1, x_2 ):
-
-$$
-x_1 > x_2 \Rightarrow f_{obs}(x_1) > f_{obs}(x_2)
-$$
-
-Thus, ranking order is preserved within each threshold regime.
-
-No intra-query ranking distortion occurs.
-
----
-
-## 6. Ranking Invariance Analysis
-
-### 6.1 Within a Fixed Threshold
-
-Since
-$$
-( f_{obs}(x) )
-$$
-is affine and strictly increasing:
-
-* Relative ordering is invariant.
-* Top-K retrieval order remains unchanged.
-* Recall sets are unaffected (assuming threshold filtering is applied prior).
-
-Therefore, the transformation is ranking-invariant within a single ( T ).
-
----
-
-### 6.2 Across Different Thresholds
-
-Consider two identical cosine values ( x ), evaluated under two thresholds
-$$
-( T_1 \neq T_2 ):
-$$
-
-$$
-f_{T_1}(x) = \frac{x - (1 - T_1)}{T_1}
-$$
-
-$$
-f_{T_2}(x) = \frac{x - (1 - T_2)}{T_2}
-$$
-
-These are distinct affine maps with different slopes:
-
-$$
-\text{slope} = \frac{1}{T}
-$$
-
-$$
-Since ( T_1 \neq T_2 ):
-$$
-
-$$
-\frac{1}{T_1} \neq \frac{1}{T_2}
-$$
-
-Therefore:
-
-* The same cosine similarity yields different ECM scores.
-* Cross-query comparability is broken.
-* Cross-version comparability is broken.
-* Any downstream component consuming ECM as a calibrated similarity metric receives non-stationary inputs.
-
-This violates scale invariance across threshold configurations.
-
----
-
-## 7. Geometric Interpretation
-
-### 7.1 Classical Normalization
-
-Graph of:
-
-$$
-f_{classic}(x) = \frac{x - T}{1 - T}
-$$
-
-$$
-Passes through (T, 0)
-$$
-
-$$
-Passes through (1, 1)
-$$
-
-$$
-Slope = ( \frac{1}{1 - T} )
-$$
-
-Interpretation: compresses interval [T, 1] into [0, 1].
-
----
-
-### 7.2 Observed Transformation
-
-Graph of:
-
-$$
-f_{obs}(x) = \frac{x - (1 - T)}{T}
-$$
-
-$$
-Passes through (1 − T, 0)
-$$
-
-$$
-Passes through (1, 1)
-$$
-
-$$
-Slope = ( \frac{1}{T} )
-$$
-
-Geometrically:
-
-* The zero-crossing is shifted left.
-* The slope is steeper for smaller T.
-* The mapping does not anchor at (T, 0).
-
-For ( T = 0.76 ):
-
-* Zero at 0.24
-* Slope ≈ 1.316
-
-For ( T = 0.748 ):
-
-* Zero at 0.252
-* Slope ≈ 1.337
-
-Thus, ECM values are effectively rescaled and translated cosine similarities, not normalized ones.
-
----
-
-## 8. Architectural Risk Assessment
-
-### 8.1 Properties Observed
-
-* Affine post-processing dependent on threshold.
-* Dual threshold regime active simultaneously.
-* Score representation not equivalent to cosine similarity.
-* Monotonic ranking preserved locally.
-* Global score scale not invariant.
-
-### 8.2 Risk Implications
-
-1. Cross-query score comparability compromised.
-2. Offline evaluation metrics may drift.
-3. Calibration and explainability degraded.
-4. A/B testing across threshold versions may produce non-intuitive deltas.
-5. Reranking models consuming ECM as feature input receive threshold-coupled signals.
-
----
-
-## 9. Conclusions
-
-The production similarity layer applies:
-
-$$
-ECM = \frac{SQL - (1 - T)}{T}
-$$
-
-with:
-
-$$
-T \in {0.76, 0.748}
-$$
-
-The transformation:
-
-* Is affine.
-* Is strictly monotonic.
-* Preserves ranking within a regime.
-* Breaks scale invariance across regimes.
-
-The reconstruction was achieved using only numerical outputs and validated with up to six-decimal precision across multiple anonymized candidates .
-
-This case demonstrates a general methodology for black-box auditing of similarity scoring systems in production ML infrastructure.
